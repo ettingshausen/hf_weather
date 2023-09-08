@@ -190,8 +190,7 @@ class HeFengWeather(WeatherEntity):
                 ATTR_FORECAST_TEMP_LOW: entry[2],
                 ATTR_FORECAST_TIME: entry[3],
                 ATTR_FORECAST_PRECIPITATION: entry[4],
-                ATTR_FORECAST_PROBABLE_PRECIPITATION: entry[5],
-                "condition_cn": entry[6]
+                ATTR_FORECAST_PROBABLE_PRECIPITATION: entry[5]
             }
             reftime = reftime + timedelta(days=1)
             forecast_data.append(data_dict)
@@ -217,8 +216,7 @@ class HeFengWeather(WeatherEntity):
         # _LOGGER.debug('hourly_forecast_data: %s', forecast_data)
         return forecast_data
 
-    @asyncio.coroutine
-    def async_update(self):
+    async def async_update(self):
         """update函数变成了async_update."""
         self._updatetime = self._data.updatetime
         self._name = self._data.name
@@ -243,8 +241,9 @@ class WeatherData(object):
         """初始化函数."""
         self._hass = hass
 
-        self._url = "https://way.jd.com/he/freeweather"
-        self._params = { "city": city, "appkey": appkey }
+        self._params = {"location": city,
+                        "key": appkey}
+
 
         self._name = None
         self._condition = None
@@ -325,83 +324,69 @@ class WeatherData(object):
     def suggestion(self):
         """生活建议."""
         return self._suggestion
+    
+    def format_datetime(self, input_time):
+        parsed_time = datetime.fromisoformat(input_time)
+        return parsed_time.strftime("%Y-%m-%d %H:%M")
 
-    @asyncio.coroutine
-    def async_update(self, now):
+
+    async def fetch_url(self, session, url, params):
+        async with session.get(url, params=params) as response:
+            return await response.json()
+        
+    def parse_condition(self, text):
+        match_list = [k for k, v in CONDITION_CLASSES.items() if text in v]
+        return match_list[0] if match_list else 'unknown'
+
+    async def async_update(self, now):
         """从远程更新信息."""
         _LOGGER.info("Update from JingdongWangxiang's OpenAPI...")
 
-        # 通过HTTP访问，获取需要的信息
-        # 此处使用了基于aiohttp库的async_get_clientsession
-        try:
-            session = async_get_clientsession(self._hass)
-            with async_timeout.timeout(15):
-                response = yield from session.post(
-                    self._url, data=self._params)
+        endpoits = ['basic', 'aqi', 'now', '7d', '24h', 'suggestion']
+        urls = [
+        'https://geoapi.qweather.com/v2/city/lookup',
+        'https://devapi.qweather.com/v7/air/now',
+        'https://devapi.qweather.com/v7/weather/now',
+        'https://devapi.qweather.com/v7/weather/7d',
+        'https://devapi.qweather.com/v7/weather/24h',
+        'https://devapi.qweather.com/v7/indices/1d?type=1,2,3,5,6,8,9,10']
 
-        except(asyncio.TimeoutError, aiohttp.ClientError):
-            _LOGGER.error("Error while accessing: %s", self._url)
-            return
+        params = self._params
 
-        if response.status != 200:
-            _LOGGER.error("Error while accessing: %s, status=%d",
-                          self._url,
-                          response.status)
-            return
+        session = async_get_clientsession(self._hass)
+        tasks = [self.fetch_url(session, url, params) for url in urls]
+        results = await asyncio.gather(*tasks)
+        for endpoint, result in zip(endpoits, results):
+            _LOGGER.warn(f'Response from {endpoint}: {str(result)}...')
+            if result is not None and result["code"] == '200':
+                
+                 if endpoint == 'aqi':
+                     self._aqi = {
+                    "aqi": result["now"]["aqi"],
+					"qlty": result["now"]["category"],
+					"pm25": result["now"]["pm2p5"],
+					"pm10": result["now"]["pm10"],
+					"no2": result["now"]["no2"],
+					"so2": result["now"]["so2"],
+					"co": result["now"]["co"],
+					"o3": result["now"]["o3"],}
+                 elif endpoint == 'basic':
+                     self._name = result["location"][0]["name"]
+                 elif endpoint == 'now':
+                     self._temperature = float(result["now"]["temp"])
+                     self._humidity = int(result["now"]["humidity"])
+                     self._pressure = int(result["now"]["pressure"])
+                     self._wind_speed = float(result["now"]["windSpeed"])
+                     self._wind_bearing = float(result["now"]["wind360"])
+                     self._updatetime = self.format_datetime(result["updateTime"])
+                     self._condition = result["now"]["text"]
+                 elif endpoint == 'suggestion':
+                     self._suggestion = [{'title': TRANSLATE_SUGGESTION.get(suggestion["type"], suggestion["type"]), 'title_cn': suggestion["name"], 'brf': suggestion["category"], 'txt': suggestion["text"] } for suggestion in result["daily"]]
+                 elif endpoint == '7d':
+                     self._daily_forecast = [[self.parse_condition(forecast["textDay"]), int(forecast["tempMax"]), int(forecast["tempMin"]), forecast["fxDate"], forecast["precip"], "0"] for forecast in result["daily"]]
+                 elif endpoint == '24h':
+                     latest7h = result["hourly"][:7]
+                     self._hourly_forecast = [[hour["text"], int(hour["temp"]), self.format_datetime(hour["fxTime"]), hour["pop"], hour['precip']] for hour in latest7h]
+            else: 
+                return
 
-        result = yield from response.json()
-
-        if result is None:
-            _LOGGER.error("Request api Error")
-            return
-        elif result["code"] != "10000":
-            _LOGGER.error("Error API return, code=%s, msg=%s",
-                          result["code"],
-                          result["msg"])
-            return
-
-        # 根据http返回的结果，更新数据
-        all_result = result["result"]["HeWeather5"][0]
-        self._temperature = float(all_result["now"]["tmp"])
-        self._humidity = int(all_result["now"]["hum"])
-        self._name = all_result["basic"]["city"]
-        self._condition = all_result["now"]["cond"]["txt"]
-        self._pressure = int(all_result["now"]["pres"])
-        self._wind_speed = float(all_result["now"]["wind"]["spd"])
-        self._wind_bearing = float(all_result["now"]["wind"]["deg"])
-        self._updatetime = all_result["basic"]["update"]["loc"]
-        self._aqi = all_result['aqi']['city']
-        self._suggestion = [{'title': k, 'title_cn': TRANSLATE_SUGGESTION.get(k,k), 'brf': v.get('brf'), 'txt': v.get('txt') } for k, v in all_result["suggestion"].items()]
-
-        datemsg = all_result["daily_forecast"]
-        forec_cond = []
-        for n in range(7):
-            for i, j in CONDITION_CLASSES.items():
-                if datemsg[n]["cond"]["txt_d"] in j:
-                    forec_cond.append(i)
-        self._daily_forecast = [
-            [forec_cond[0], int(datemsg[0]["tmp"]["max"]), int(datemsg[0]["tmp"]["min"]), datemsg[0]["date"], datemsg[0]["pcpn"], datemsg[0]["pop"], datemsg[0]["cond"]["txt_d"]],
-            [forec_cond[1], int(datemsg[1]["tmp"]["max"]), int(datemsg[1]["tmp"]["min"]), datemsg[1]["date"], datemsg[1]["pcpn"], datemsg[1]["pop"], datemsg[1]["cond"]["txt_d"]],
-            [forec_cond[2], int(datemsg[2]["tmp"]["max"]), int(datemsg[2]["tmp"]["min"]), datemsg[2]["date"], datemsg[2]["pcpn"], datemsg[2]["pop"], datemsg[2]["cond"]["txt_d"]],
-            [forec_cond[3], int(datemsg[3]["tmp"]["max"]), int(datemsg[3]["tmp"]["min"]), datemsg[3]["date"], datemsg[3]["pcpn"], datemsg[3]["pop"], datemsg[3]["cond"]["txt_d"]],
-            [forec_cond[4], int(datemsg[4]["tmp"]["max"]), int(datemsg[4]["tmp"]["min"]), datemsg[4]["date"], datemsg[4]["pcpn"], datemsg[4]["pop"], datemsg[4]["cond"]["txt_d"]],
-            [forec_cond[5], int(datemsg[5]["tmp"]["max"]), int(datemsg[5]["tmp"]["min"]), datemsg[5]["date"], datemsg[5]["pcpn"], datemsg[5]["pop"], datemsg[5]["cond"]["txt_d"]],
-            [forec_cond[6], int(datemsg[6]["tmp"]["max"]), int(datemsg[6]["tmp"]["min"]), datemsg[6]["date"], datemsg[6]["pcpn"], datemsg[6]["pop"], datemsg[6]["cond"]["txt_d"]]
-            ]
-        datemsg = all_result["hourly_forecast"]
-        forec_cond = []
-        for n in range(7):
-            for i, j in CONDITION_CLASSES.items():
-                if datemsg[n]["cond"]["txt"] in j:
-                    forec_cond.append(i)
-        self._hourly_forecast = [
-            [forec_cond[0], int(datemsg[0]["tmp"]), datemsg[0]["date"], datemsg[0]["pop"], datemsg[0]["cond"]["txt"]],
-            [forec_cond[1], int(datemsg[1]["tmp"]), datemsg[1]["date"], datemsg[1]["pop"], datemsg[1]["cond"]["txt"]],
-            [forec_cond[2], int(datemsg[2]["tmp"]), datemsg[2]["date"], datemsg[2]["pop"], datemsg[2]["cond"]["txt"]],
-            [forec_cond[3], int(datemsg[3]["tmp"]), datemsg[3]["date"], datemsg[3]["pop"], datemsg[3]["cond"]["txt"]],
-            [forec_cond[4], int(datemsg[4]["tmp"]), datemsg[4]["date"], datemsg[4]["pop"], datemsg[4]["cond"]["txt"]],
-            [forec_cond[5], int(datemsg[5]["tmp"]), datemsg[5]["date"], datemsg[5]["pop"], datemsg[5]["cond"]["txt"]],
-            [forec_cond[6], int(datemsg[6]["tmp"]), datemsg[6]["date"], datemsg[6]["pop"], datemsg[6]["cond"]["txt"]]
-            ]
-
-        _LOGGER.info("success to fetch local informations from API")

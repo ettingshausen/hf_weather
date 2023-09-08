@@ -11,7 +11,9 @@
 
 [![Add Integration](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start?domain=hf_weather)
 
-注意：请自行申请appkey: https://wx.jdcloud.com/market/datas/26/10610
+~~注意：请自行申请appkey: https://wx.jdcloud.com/market/datas/26/10610~~  
+
+**注意** 和风申请的 `appkey`，申请地址：https://dev.qweather.com/ 
 
 > Lovelace配置
 

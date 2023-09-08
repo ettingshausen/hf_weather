@@ -11,7 +11,7 @@ _LOGGER = logging.getLogger(__name__)
 
 DATA_SCHEMA = vol.Schema({
     vol.Required("name", default = "天气"): str,
-    vol.Required("city", default = "shanghai"): str,
+    vol.Required("city", default = "101110101"): str,
     vol.Required("appkey", default = ""): str
 })
 
